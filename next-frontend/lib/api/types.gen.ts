@@ -200,16 +200,233 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/videos": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Pre-register a video draft and start its upload
+         * @description Creates the draft (processing_status=uploading) and opens a multipart upload in storage. The browser then PUTs the parts directly to storage using presigned URLs.
+         */
+        post: operations["VideosController_create"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/videos/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get an owned video
+         * @description Returns the video with presigned media URLs when available. Drafts are visible only to their owner; other users get 404.
+         */
+        get: operations["VideosController_findOne"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/videos/{id}/upload/parts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List the uploaded parts
+         * @description Lists the parts already stored — used to resume an interrupted upload.
+         */
+        get: operations["VideosController_listParts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/videos/{id}/upload/parts/{partNumber}/url": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Presign the PUT URL of one part
+         * @description Returns a short-lived presigned PUT URL, signed against the public storage endpoint.
+         */
+        get: operations["VideosController_presignPart"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/videos/{id}/upload/complete": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Complete the upload
+         * @description Completes the multipart upload, moves the video to processing and enqueues the processing job.
+         */
+        post: operations["VideosController_complete"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/videos/{id}/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Cancel the upload
+         * @description Aborts the multipart upload; the draft becomes failed with processing_error=UPLOAD_ABORTED.
+         */
+        delete: operations["VideosController_abort"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        RegisterDto: Record<string, never>;
-        ResendConfirmationDto: Record<string, never>;
-        LoginDto: Record<string, never>;
-        RefreshTokenDto: Record<string, never>;
-        ForgotPasswordDto: Record<string, never>;
-        ResetPasswordDto: Record<string, never>;
+        RegisterDto: {
+            /** Format: email */
+            email: string;
+            password: string;
+        };
+        ResendConfirmationDto: {
+            /** Format: email */
+            email: string;
+        };
+        LoginDto: {
+            /** Format: email */
+            email: string;
+            password: string;
+        };
+        RefreshTokenDto: {
+            refresh_token: string;
+        };
+        ForgotPasswordDto: {
+            /** Format: email */
+            email: string;
+        };
+        ResetPasswordDto: {
+            token: string;
+            new_password: string;
+        };
+        CreateVideoUploadDto: {
+            /** @description Original file name; the draft title is this name without extension. */
+            file_name: string;
+            /**
+             * @description One of the accepted video container types.
+             * @enum {string}
+             */
+            mime_type: "video/mp4" | "video/quicktime" | "video/webm" | "video/x-matroska";
+            /** @description File size in bytes (max 10 GiB). */
+            size_bytes: number;
+        };
+        CreateVideoUploadResponseDto: {
+            /** Format: uuid */
+            videoId: string;
+            /** @description Storage multipart UploadId */
+            uploadId: string;
+            /** @example videos/7f1c…/source */
+            key: string;
+        };
+        /** @enum {string} */
+        VideoStatus: "draft";
+        /** @enum {string} */
+        VideoProcessingStatus: "uploading" | "processing" | "ready" | "failed";
+        VideoResponseDto: {
+            /** Format: uuid */
+            id: string;
+            /**
+             * @description 11-char base62 public id
+             * @example aZ3kP9xQ2Lm
+             */
+            public_id: string;
+            title: string;
+            description: string | null;
+            original_filename: string;
+            status: components["schemas"]["VideoStatus"];
+            processing_status: components["schemas"]["VideoProcessingStatus"];
+            /**
+             * @description UPLOAD_ABORTED | UPLOAD_ABANDONED | PROBE_FAILED | TRANSCODE_FAILED when failed
+             * @example null
+             */
+            processing_error: string | null;
+            duration_seconds: number | null;
+            width: number | null;
+            height: number | null;
+            /** @description Presigned GET of the streamable MP4 (when ready) */
+            video_url: string | null;
+            /** @description Presigned GET of the generated thumbnail */
+            thumbnail_url: string | null;
+            /** @description Presigned GET with attachment disposition (when ready) */
+            download_url: string | null;
+            /** Format: date-time */
+            created_at: string;
+        };
+        UploadedPartDto: {
+            /** @example 1 */
+            PartNumber: number;
+            /** @example 67108864 */
+            Size: number;
+            /** @example "9b2cf535f27731c974343645a3985328" */
+            ETag: string;
+        };
+        UploadPartsResponseDto: {
+            parts: components["schemas"]["UploadedPartDto"][];
+        };
+        UploadPartUrlResponseDto: {
+            /** @description Presigned PUT URL for the part */
+            url: string;
+        };
+        CompletedPartDto: {
+            /** @description Part number (1..10000). */
+            PartNumber: number;
+            /** @description ETag returned by the storage for the part PUT. */
+            ETag: string;
+        };
+        CompleteVideoUploadDto: {
+            /** @description Every uploaded part, as reported by the storage. */
+            parts: components["schemas"]["CompletedPartDto"][];
+        };
         ApiErrorEnvelope: {
             /** @example 401 */
             statusCode: number;
@@ -241,7 +458,9 @@ export interface operations {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": string;
+                };
             };
         };
     };
@@ -294,7 +513,9 @@ export interface operations {
     };
     AuthController_confirmEmail: {
         parameters: {
-            query?: never;
+            query: {
+                token: string;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -581,6 +802,334 @@ export interface operations {
             };
             /** @description Missing or invalid access token */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    VideosController_create: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateVideoUploadDto"];
+            };
+        };
+        responses: {
+            /** @description Draft created and multipart upload started */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreateVideoUploadResponseDto"];
+                };
+            };
+            /** @description Validation failed (missing field, unsupported mime_type, size over 10 GiB) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Missing or invalid access token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    VideosController_findOne: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The video */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VideoResponseDto"];
+                };
+            };
+            /** @description id is not a UUID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Missing or invalid access token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Video not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    VideosController_listParts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Uploaded parts */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UploadPartsResponseDto"];
+                };
+            };
+            /** @description id is not a UUID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Missing or invalid access token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Video not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Upload is not in progress */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    VideosController_presignPart: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Video id (UUID v4). */
+                id: string;
+                /** @description Part number (1..10000). */
+                partNumber: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Presigned part URL */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UploadPartUrlResponseDto"];
+                };
+            };
+            /** @description id is not a UUID or partNumber is outside 1..10000 */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Missing or invalid access token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Video not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Upload is not in progress */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    VideosController_complete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CompleteVideoUploadDto"];
+            };
+        };
+        responses: {
+            /** @description Upload completed; processing started */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VideoResponseDto"];
+                };
+            };
+            /** @description Validation failed or storage rejected the parts (INVALID_UPLOAD_PARTS) */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Missing or invalid access token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Video not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Upload is not in progress */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+        };
+    };
+    VideosController_abort: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Upload cancelled */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description id is not a UUID */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Missing or invalid access token */
+            401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Video not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ApiErrorEnvelope"];
+                };
+            };
+            /** @description Upload is not in progress */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
