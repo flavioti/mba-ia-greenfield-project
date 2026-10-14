@@ -55,3 +55,29 @@ export type RefreshTokenPair =
 // Shared error envelope (all auth 4xx responses)
 export type ApiErrorEnvelope =
   paths["/auth/register"]["post"]["responses"][400]["content"]["application/json"];
+
+// ─── Videos (upload & processing — Phase 03) ──────────────────────────────────
+
+// Request bodies
+export type CreateVideoUploadDto =
+  paths["/videos"]["post"]["requestBody"]["content"]["application/json"];
+
+export type CompleteVideoUploadDto =
+  paths["/videos/{id}/upload/complete"]["post"]["requestBody"]["content"]["application/json"];
+
+// Pass-through success bodies
+export type CreateVideoUploadResponse =
+  paths["/videos"]["post"]["responses"][201]["content"]["application/json"];
+
+export type Video =
+  paths["/videos/{id}"]["get"]["responses"][200]["content"]["application/json"];
+
+export type VideoProcessingStatus = Video["processing_status"];
+
+export type UploadPartsResponse =
+  paths["/videos/{id}/upload/parts"]["get"]["responses"][200]["content"]["application/json"];
+
+export type UploadedPart = UploadPartsResponse["parts"][number];
+
+export type UploadPartUrlResponse =
+  paths["/videos/{id}/upload/parts/{partNumber}/url"]["get"]["responses"][200]["content"]["application/json"];

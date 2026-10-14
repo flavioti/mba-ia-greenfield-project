@@ -249,6 +249,8 @@
   --color-ring: var(--ring);
   --color-input: var(--input);
   --color-destructive: var(--destructive);
+  --color-destructive-text: var(--destructive-text);
+  --color-success-text: var(--success-text);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted: var(--muted);

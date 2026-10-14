@@ -24,7 +24,491 @@ Entregar o upload de vídeos de até 10GB sem impacto na performance: o vídeo �
 
 ## Step Implementations
 
-<!-- SIs will be written in Phase B -->
+### SI-03.1 — Infra: instalação e configuração do armazenamento S3-compatível
+
+**Description:** Instalar o client SDK, criar o módulo namespaced de configuração do storage (endpoint, bucket, credenciais, TTL de URLs), adicionar o SeaweedFS ao Compose e validar a conexão no bootstrap, sem ainda implementar operações de negócio.
+
+**Technical actions:**
+
+1. Instalar `@aws-sdk/client-s3@^3.x` e `@aws-sdk/s3-request-presigner@^3.x` (per phase-03/TD-01, TD-02).
+2. Criar `src/config/storage.config.ts` (registerAs) com `STORAGE_ENDPOINT`, `STORAGE_BUCKET`, `STORAGE_ACCESS_KEY`, `STORAGE_SECRET_KEY`, `STORAGE_REGION`, `STORAGE_FORCE_PATH_STYLE`, `STORAGE_PRESIGN_TTL_SECONDS` (per phase-03/TD-09).
+3. Criar `StorageModule` expondo um `S3Client` configurado com `forcePathStyle` (SeaweedFS) e a factory do ConfigModule (per padrão phase-01/TD-03).
+4. Adicionar serviço `seaweedfs` (volume) no `compose.yaml` do nestjs-project e a variável de bucket autocreate no bootstrap; criar bucket `streamtube` via script de setup.
+5. Atualizar `.env.example` e `env.validation.ts` (Joi) com as novas chaves; garantir `npm run migration:run` e `npm test` sem regressão.
+
+**Tests:**
+
+| Artifact | Layer | Test file |
+|----------|-------|-----------|
+| StorageConfigFactory | Unit | `src/config/storage.config.spec.ts` |
+| StorageModule (compilation) | Unit | `src/storage/storage.module.spec.ts` |
+
+**Dependencies:** None
+
+**Acceptance criteria:**
+
+- `S3Client` instancia sem erro com credenciais do `.env` local e `forcePathStyle=true`.
+- `docker compose up -d` sobe SeaweedFS acessível em `http://seaweedfs:8333` dentro da rede.
+- `npx tsc --noEmit` e `npm test` passam sem regressão.
+
+---
+
+### SI-03.2 — Infra: Redis/Valkey e BullMQ (API + worker skeleton)
+
+**Description:** Adicionar o Redis ao Compose, registrar as filas `video-processing` e `video-maintenance` na API e criar o entrypoint do worker (`src/worker.ts`) reaproveitando TypeORM entities, sem consumidores ainda.
+
+**Technical actions:**
+
+1. Instalar `@nestjs/bullmq@^11.x` e `bullmq@^5.x` (per phase-03/TD-04, TD-05).
+2. Adicionar serviço `redis` (Valkey) ao `compose.yaml` e variáveis `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD` (per phase-01/TD-01 convenção de service name).
+3. Configurar `BullModule.forRootAsync` em `AppModule` e `BullModule.registerQueue({ name: 'video-processing' }, { name: 'video-maintenance' })` em `VideosModule` (per phase-03/TD-04).
+4. Criar `src/worker.ts` (entrypoint Node) que bootstrap NestApp redundante mínimo: config, TypeORM, Bull consumers (placeholder), graciosamente lida c/ shutdown.
+5. Adicionar script `start:worker` ao `package.json` e serviço `video-worker` (depende de redis/db/seaweedfs) ao compose, montando o mesmo volume de código em watch.
+
+**Tests:**
+
+| Artifact | Layer | Test file |
+|----------|-------|-----------|
+| BullModule wiring | Unit | `src/app.module.spec.ts` ( compilation smoke ) |
+
+**Dependencies:** SI-03.1
+
+**Acceptance criteria:**
+
+- API sobe registrando as duas filas sem erro; `/queues` (Bull board opcional) mostra filas registradas.
+- `npm run start:worker` sobe o processo consumidor sem crash em compose.
+- `npx tsc --noEmit` passa.
+
+---
+
+### SI-03.3 — Entidade Video + migração inicial
+
+**Description:** Modelar a tabela `videos` (dois eixos ortogonais de estado) com public_id, source/video/thumbnail keys e metadados, gerar a migração TypeORM e a repository wiring.
+
+**Technical actions:**
+
+1. Criar `src/videos/entities/video.entity.ts` com colunas per TD-06 (uuid id, public_id varchar(11) unique, channel_id FK (CASCADE), title, description, original_filename, mime_type, size_bytes bigint, status enum default draft, processing_status enum default uploading, processing_error, source_key, upload_id, video_key, thumbnail_key, duration_seconds, width, height, video_codec, audio_codec, timestamps) — per phase-03/TD-06.
+2. Adicionar enums `video_status` (`draft`) e `video_processing_status` (`uploading`,`processing`,`ready`,`failed`) e o índice `(processing_status, created_at)`, unique em `public_id`, index em `channel_id` (per phase-03/TD-06, TD-10).
+3. Criar relação `Channel (one) ↔ Video (many)` em `channel.entity.ts` / `video.entity.ts`.
+4. Rodar `npm run migration:generate -- src/database/migrations/AddVideosTable` e revisar SQL (enums, FK, índices) + `npm run migration:run`.
+5. Registrar `TypeOrmModule.forFeature([Video])` em `VideosModule` e exportar `Repository<Video>`.
+
+**Tests:**
+
+| Artifact | Layer | Test file |
+|----------|-------|-----------|
+| Video entity (constraints/defaults) | Integration | `src/videos/entities/video.entity.integration-spec.ts` |
+| VideosModule (compilation) | Unit | `src/videos/videos.module.spec.ts` |
+
+**Dependencies:** SI-03.1, SI-03.2
+
+**Acceptance criteria:**
+
+- `npm run migration:run` cria a tabela com enums/índices/FK; `npm run migration:revert` desfaz sem erros.
+- Inserir dois vídeos com mesmo `public_id` (gerado manualmente) falha com unique violation.
+- Criar `Video` com payload mínimo popula defaults (`status=draft`, `processing_status=uploading`, timestamps).
+
+---
+
+### SI-03.4 — Helper de public_id (base62, 11 chars) e spawn-wrapper FFmpeg
+
+**Description:** Implementar gerador de `public_id` com `crypto.randomBytes` (retry em colisão) e um wrapper spawnpromisse para `ffprobe`/`ffmpeg` com captura de stdout/stderr e timeout, testável com fake spawner.
+
+**Technical actions:**
+
+1. Criar `src/videos/util/public-id.util.ts` expondo `generatePublicId(length=11)` usando `crypto.randomBytes` + alfabeto base62 (per phase-03/TD-10) — retry até `N` tentativas em colisão (delega checagem ao repo).
+2. Criar `src/videos/util/ffmpeg-spawn.util.ts` (`spawnFfprobe`, `spawnFfmpeg`) retornando `{exitCode, stdout, stderr}` com `timeout` e cancellation por `kill`, usando `child_process.spawn` (per phase-03/TD-07).
+3. Internacionalizar erros como `ProbeFailedException`/`TranscodeFailedException` mapeados ao ErrorCatalog.
+4. Testes unitários com spawner fake (sem binário real no unit) e integration smoke contra fixture de vídeo se disponível.
+
+**Tests:**
+
+| Artifact | Layer | Test file |
+|----------|-------|-----------|
+| PublicId util | Unit | `src/videos/util/public-id.util.spec.ts` |
+| Ffmpeg spawn util | Unit | `src/videos/util/ffmpeg-spawn.util.spec.ts` |
+
+**Dependencies:** SI-03.3
+
+**Acceptance criteria:**
+
+- 10.000 gerações de `publicId` não produzem duplicatas em memória (smoke estatístico).
+- Spawn wrapper mata o processo em timeout e retorna `exitCode !== 0` com stderr capturado.
+- `npx tsc --noEmit` passa.
+
+---
+
+### SI-03.5 — StorageService: operações multipart + URLs pré-assinadas de mídia
+
+**Description:** Encapsular todas as operações S3 (CreateMultipartUpload, UploadPart presign, ListParts, CompleteMultipartUpload, AbortMultipartUpload) e presigned GET para vídeo (Range), download (attachment) e thumbnail, com o endpoint público correto.
+
+**Technical actions:**
+
+1. Criar `src/storage/storage.service.ts` com métodos: `createMultipartUpload(key, contentType)`, `presignPartUrl(key, uploadId, partNumber)`, `listParts(key, uploadId)`, `completeMultipartUpload(key, uploadId, parts)`, `abortMultipartUpload(key, uploadId)` (per phase-03/TD-02).
+2. Adicionar `presignGetVideoUrl(key)`, `presignGetDownloadUrl(key, filename)` (ResponseContentDisposition attachment) e `presignGetThumbnailUrl(key)` (per phase-03/TD-09).
+3. Usar `getSignedUrl` com `forcePathStyle` endpoint público e TTL de `STORAGE_PRESIGN_TTL_SECONDS`; assinar com endpoint público (per phase-03/TD-02/TD-09).
+4. Criar `StorageModule` (export) e registrar no `VideosModule`.
+5. Tratar erros S3 (`InvalidPart`, `NoSuchUpload`) mapeando para `INVALID_UPLOAD_PARTS` e 404 (per phase-03/TD-02/TD-09).
+
+**Tests:**
+
+| Artifact | Layer | Test file |
+|----------|-------|-----------|
+| StorageService (multipart + presign) | Integration | `src/storage/storage.service.integration-spec.ts` |
+
+**Dependencies:** SI-03.1, SI-03.4
+
+**Acceptance criteria:**
+
+- CreateMultipartUpload contra SeaweedFS retorna `UploadId` e `key`.
+- `presignPartUrl` retorna URL PUT válida que aceita bytes e o GET posteriormente (smoke).
+- `completeMultipartUpload` com partes válidas produz objeto legível; partes inválidas lançam `INVALID_UPLOAD_PARTS`.
+- Abort remove o upload (ListParts falha/empty).
+
+---
+
+### SI-03.6 — DTOs, VideosService e Controller (endpoints de upload)
+
+**Description:** Implementar o CRUD/orquestração de upload: pré-cadastro do rascunho (POST /videos), presign/list parts, complete (enfileira processamento) e abort, com ownership (404 para não-dono) e ValidationPipe.
+
+**Technical actions:**
+
+1. Criar DTOs `CreateVideoUploadDto` (file_name, mime_type, size_bytes), `CompleteVideoUploadDto` (parts array), aplicando class-validator (per phase-02/TD-06, phase-03 validation rules) + ParseUUIDPipe/ParseIntPipe.
+2. Criar `VideosService`: `createDraft(userId, dto)` (channel lookup via ChannelsService, resolve public_id com retry, source_key `videos/{id}/source`, insert uploading), `listParts`, `presignPartUrl`, `completeUpload` (CompleteMultipart + status=processing + enqueue `process-video`), `abortUpload` (AbortMultipart + status=failed/UPLOAD_ABORTED), `findById` (owner only, presigned URLs quando ready).
+3. Criar `VideosController` com rotas per API Contracts §Backend tier, aplicando `@Public()`? (manter guard global sem @Public — all protected) e `@Throttle()`? (default).
+4. Adicionar `public_id` retry loop em colisão e normalização de `title` (filename sem ext).
+5. Exportar `Queue` injection no service via `@InjectQueue('video-processing')` (per phase-03/TD-04).
+
+**Tests:**
+
+| Artifact | Layer | Test file |
+|----------|-------|-----------|
+| VideosService (branch + DB) | Unit + Integration | `src/videos/videos.service.spec.ts`, `src/videos/videos.service.integration-spec.ts` |
+| VideosController (validation wiring) | E2E | `test/videos.e2e-spec.ts` |
+
+**Dependencies:** SI-03.3, SI-03.4, SI-03.5
+
+**Acceptance criteria:**
+
+- `POST /videos` com payload válido retorna 201 com `{videoId, uploadId, key}` e cria rascunho `processing_status=uploading`.
+- `GET /videos/{id}/upload/parts/{n}/url` retorna URL assinada; parte não-owner (ou não-upload) → 404/409.
+- `POST /videos/{id}/upload/complete` com partes válidas → 200 com `processing_status=processing` e job enfileirado.
+- `DELETE /videos/{id}/upload` → 204 e `processing_status=failed`, `processing_error=UPLOAD_ABORTED`.
+- `GET /videos/{id}` retorna URLs pré-assinadas apenas quando `ready`.
+
+---
+
+### SI-03.7 — VideoProcessingProcessor (ffprobe + remux/transcode + thumbnail)
+
+**Description:** Consumer BullMQ que processa o vídeo: download do source para tmp, ffprobe, decisão remux vs transcode para MP4 faststart (H.264/AAC), geração de thumbnail JPEG (~10% duração), grava metadados + status=ready; grava failed + processing_error em erro final (attempts=3, backoff exponencial).
+
+**Technical actions:**
+
+1. Criar `src/videos/processors/video-processing.processor.ts` (`@Processor('video-processing')`, `@Process('process-video')`) consumindo `{videoId}` per Events/Messages (per phase-03/TD-04, TD-07).
+2. Pipeline: download source → `ffprobe` (duração, resolução, codecs) → se codec browser-safe (H.264/AAC em MP4/MOV) remux faststart, senão transcode H.264/AAC MP4 faststart → thumbnail JPEG em ~10% duração → upload outputs → persistir `video_key`, `thumbnail_key`, metadados, `processing_status=ready` (per phase-03/TD-07, TD-08, TD-11).
+3. Em falha final, setar `processing_status=failed` + `processing_error` (`PROBE_FAILED`/`TRANSCODE_FAILED`); idempotência por sobrescrita das chaves (per phase-03/TD-04/TD-11).
+4. Configurar `attempts: 3`, `backoff: { type:'exponential', delay:5000 }`, concurrency `VIDEO_WORKER_CONCURRENCY` (default 1) no módulo (per phase-03/TD-04).
+5. Limpeza de arquivos temporários (try/finally) e logging estruturado; graceful handling de SIGTERM.
+
+**Tests:**
+
+| Artifact | Layer | Test file |
+|----------|-------|-----------|
+| VideoProcessingProcessor (branch/pipeline) | Unit (fake spawner) + Integration (fixture vídeo + SeaweedFS real) | `src/videos/processors/video-processing.processor.spec.ts`, `src/videos/processors/video-processing.processor.integration-spec.ts` |
+
+**Dependencies:** SI-03.3, SI-03.4, SI-03.6
+
+**Acceptance criteria:**
+
+- Vídeo MP4 compatível → `processing_status=ready` com `video_key`, `thumbnail_key`, duração/resolução; reproduz via Range sem download completo.
+- Vídeo com codec não compatível → normalizado para H.264/AAC MP4 faststart e marcado `ready`.
+- `ffprobe` falho → `processing_status=failed`, `processing_error=PROBE_FAILED` após 3 tentativas.
+- Reprocessar o mesmo job sobrescreve as mesmas chaves sem erro (idempotente).
+
+---
+
+### SI-03.8 — AbandonedUploadCleanup (job agendado) + worker compose
+
+**Description:** Implementar o cleanup horário de uploads abandonados (AbortMultipart + failed/UPLOAD_ABANDONED) e finalizar o worker no Compose com FFmpeg instalado na imagem dev.
+
+**Technical actions:**
+
+1. Criar `src/videos/processors/abandoned-upload-cleanup.processor.ts` consumindo `cleanup-abandoned-uploads` com payload `{}` selecionando vídeos `uploading` com `created_at < now() - UPLOAD_ABANDON_AFTER_HOURS` (default 24) (per phase-03/TD-12).
+2. Para cada candidato: `AbortMultipartUpload` (ignorar `NoSuchUpload`) + update `processing_status=failed`, `processing_error=UPLOAD_ABANDONED`, `upload_id=null`.
+3. Registrar `upsertJobScheduler('abandoned-upload-cleanup', { pattern: '0 0 * * * *' })` no bootstrap do worker (per phase-03/TD-12).
+4. Atualizar `Dockerfile.dev`/`compose.yaml` para incluir `ffmpeg` e `ffprobe` na imagem API/worker (ou imagem dedicada worker com ffmpeg + node).
+5. Garantir idempotência (só atua em linhas ainda `uploading`) e que o scheduler não derruba a API (worker-only).
+
+**Tests:**
+
+| Artifact | Layer | Test file |
+|----------|-------|-----------|
+| AbandonedUploadCleanupProcessor | Integration (DB + storage) | `src/videos/processors/abandoned-upload-cleanup.processor.integration-spec.ts` |
+
+**Dependencies:** SI-03.6, SI-03.7
+
+**Acceptance criteria:**
+
+- Vídeo `uploading` com `created_at` mais antigo que a janela → abortado + marcado `failed/UPLOAD_ABANDONED`.
+- Vídeo `uploading` recente → não é tocado.
+- Worker container inicia com `ffmpeg`/`ffprobe` disponíveis (`which ffmpeg` exit 0).
+
+---
+
+### SI-03.9 — BFF: contracts + Route Handlers + integração OpenAPI (next-frontend)
+
+**Description:** Adicionar aliases de contrato em `lib/api/contracts.ts`, regenerar `types.gen.ts` a partir do openapi exportado, e criar os Route Handlers BFF para upload (pass-through com `withRefresh`).
+
+**Technical actions:**
+
+1. Rodar export OpenAPI do NestJS e copiar para `next-frontend/openapi.json`; rodar script de geração (`npm run generate:api-types`) → `lib/api/types.gen.ts`.
+2. Adicionar aliases em `lib/api/contracts.ts`: `CreateVideoUploadDto`, `CompleteVideoUploadDto`, `Video` (pass-through, reshape none) per phase-02-openapi-typing/TD-04.
+3. Criar Route Handlers: `app/api/videos/route.ts` (POST), `app/api/videos/[id]/route.ts` (GET), `app/api/videos/[id]/upload/parts/route.ts` (GET), `app/api/videos/[id]/upload/parts/[partNumber]/url/route.ts` (GET), `app/api/videos/[id]/upload/complete/route.ts` (POST), `app/api/videos/[id]/upload/route.ts` (DELETE), cada um lendo cookie iron-session, upstream via openapi-fetch, refresh transparente no 401 (withRefresh) per phase-02-auth-frontend/TD-01/TD-03.
+4. Criar MSW handlers em `mocks/handlers/videos.ts` (typed via `paths`) para os endpoints de upload (incl. reserved triggers para 404/409/invalid parts) per next-frontend-msw-foundation.
+5. Atualizar `lib/auth/*` se necessário para expor helper `upstream` reusável (já existente da base).
+
+**Tests:**
+
+| Artifact | Layer | Test file |
+|----------|-------|-----------|
+| BFF Route Handlers (proxy + reshape) | Integration (MSW) | `app/api/videos/**/route.integration.test.ts` |
+
+**Dependencies:** SI-03.6, SI-03.5
+
+**Acceptance criteria:**
+
+- Cada Route Handler retorna pass-through (sem reshape) e 401 → redirect sessão expirou per BFF policy.
+- MSW handlers tipados via `paths` compilam (`npx tsc --noEmit`).
+- `npm run generate:api-types` não produz diff após rodar twice (idempotente).
+
+---
+
+### SI-03.10 — Frontend: layout `/studio` (shell mínimo) + route guard + Uppy provider
+
+**Description:** Criar o layout autenticado mínimo para `/studio`: AppShell, AppHeader (logo + atalho upload + avatar), route guard RSC (redirect `/login` se sem sessão), e o provider Uppy (TD-03 5.x) acima das rotas para progresso sobreviver à navegação.
+
+**Technical actions:**
+
+1. Instalar `@uppy/core@^5.2.0`, `@uppy/aws-s3@^5.1.0` (per phase-03/TD-03, pinned 5.x).
+2. Criar `app/studio/layout.tsx` (RSC) lendo iron-session; sem sessão → `redirect('/login')`; renderiza `<AppShell>` + `<UppyProvider>`.
+3. Criar componentes em `components/layout/app-shell.tsx`, `app-header.tsx`, `account-menu.tsx`, `components/ui/avatar.tsx` per UI Contracts (per OQ-17: omitir sidebar/search/subscriptions).
+4. Criar `components/ui/progress.tsx` (primitive shadcn) e `components/studio/*.tsx` placeholders que serão preenchidos nas screens (dropzone/progress/status/thumbnail/link/player).
+5. Criar `lib/upload/uppy.ts` instanciando Uppy core + AwsS3 plugin com `shouldUseMultipart: () => true` (per phase-03/TD-02/TD-03) e callbacks createMultipartUpload/signPart/listParts/abort/complete chamando os BFF endpoints.
+
+**Tests:**
+
+| Artifact | Layer | Test file |
+|----------|-------|-----------|
+| session guard (layout) | E2E | `tests/studio.e2e-spec.ts` |
+| Uppy provider / util | Unit | `lib/upload/uppy.spec.ts` |
+
+**Dependencies:** SI-03.9
+
+**Acceptance criteria:**
+
+- Anônimo acessando `/studio/*` → redirect `/login`.
+- Autenticado renderiza shell com logo, atalho de upload e avatar; sem sidebar/search (per OQ-17).
+- Instância Uppy é estável entre navegação `/studio/videos/new` → `/studio/videos/[id]` (progresso não se perde).
+
+---
+
+### SI-03.11.0 — Drift audit: tela de upload de vídeo (`/studio/videos/new`)
+
+**Description:** Auditar o Figma (node 39-1594) contra os componentes existentes em disco e emitir `frontend-drift-report.md` (per schema referenced), sem edits de código.
+
+**Technical actions:**
+
+1. Rodar o audit per `docs/inventories/screen-inventory-phase-03-upload-processing.md` (Reused DS list) + Figma node 39-1594.
+2. Emitir `docs/phases/phase-03-upload-processing/frontend-drift-report.md` seguindo schema (classification: alinhado/drift-menor/drift-relevante/ausente).
+3. Listar auto-Edits (menor) a aplicar em SI-03.11a, sem CONFLICT por overlap com SI anteriores.
+
+**Tests:** _(empty — audit-only)_
+
+**Dependencies:** SI-03.10
+
+**Acceptance criteria:**
+
+- `frontend-drift-report.md` emitido com quick-scan (components, classification, drift count).
+- Nenhum edit em `next-frontend/` pelo audit (AC "git diff vazio" interpretado como sem edits de código).
+
+---
+
+### SI-03.11a — Tela de upload de vídeo (`/studio/videos/new`): visual shell
+
+**Description:** Implementar o visual shell da tela de upload (dropzone idle/drag-over, validação inline, botão "Select file") aplicando os auto-Edits do drift report, com copy no singular.
+
+**Technical actions:**
+
+1. Criar `app/studio/videos/new/page.tsx` (RSC shell + client dropzone).
+2. Criar `components/studio/video-dropzone.tsx` (drag-over, validação client-side mime/size, erro inline Alert, single-file accept) per UI Contracts.
+3. Aplicar auto-Edits do drift report em DS existentes se houver.
+4. Compor com AppShell, AppHeader, BrandLogo, UploadNavButton, Avatar (per UI Contracts Reused DS list).
+
+**Tests:** _(empty — shell smoke-gated by build AC; Unit tests live in SI-03.11b; E2E via /plan-test-specs)_
+
+**Dependencies:** SI-03.10, SI-03.11.0
+
+**Acceptance criteria:**
+
+- Rota `/studio/videos/new` renderiza dropzone idle (ícone, copy singular, botão "Select file").
+- Validação client-side rejeita tipo não aceito e arquivo >10GB com Alert inline; dropzone volta ao idle.
+- `npm run build` da next-frontend compila.
+
+---
+
+### SI-03.11b — Tela de upload de vídeo (`/studio/videos/new`): lógica & wiring
+
+**Description:** Conectar a dropzone ao fluxo de upload: validação, pré-cadastro via BFF, navegação para `/studio/videos/{videoId}` e erro handling com reservados MSW.
+
+**Technical actions:**
+
+1. Wiring RHF/validação de arquivo + chamada `POST /api/videos` (CreateVideoUploadDto) → `{videoId, uploadId, key}`.
+2. Disparar fluxo Uppy (multipart) em background no provider; navegar para `/studio/videos/{videoId}`.
+3. Error mapping: 400 → Alert inline; 401 → redirect `/login`; rede/5xx → Alert "Não foi possível iniciar o upload".
+4. Mais de um arquivo solto → aceitar o primeiro e ignorar o restante (single-file).
+
+**Tests:**
+
+| Artifact | Layer | Test file |
+|----------|-------|-----------|
+| VideoDropzone wiring | Unit (Vitest+jsdom, MSW) | `components/studio/__tests__/video-dropzone.wiring.test.tsx` |
+
+**Dependencies:** SI-03.9, SI-03.10, SI-03.11a
+
+**Acceptance criteria:**
+
+- Selecionar arquivo válido → pré-cadastra rascunho e navega para `/studio/videos/{videoId}`.
+- Payload inválido → Alert inline + dropzone volta ao idle (sem navegação).
+- Arquivo >10GB → erro inline antes de chamar a API.
+
+---
+
+### SI-03.12.0 — Drift audit: tela de upload e processamento (`/studio/videos/[id]`)
+
+**Description:** Auditar Figma node 39-1642 contra disco e emitir drift report para o painel de upload/processamento (UI Contracts Reused DS list), sem edits.
+
+**Technical actions:**
+
+1. Rodar audit per inventory (13 componentes new) + Figma node 39-1642.
+2. Emitir `frontend-drift-report.md` (ou seção adicional) com classificação por componente.
+3. Listar auto-Edits para SI-03.12a.
+
+**Tests:** _(empty — audit-only)_
+
+**Dependencies:** SI-03.10
+
+**Acceptance criteria:**
+
+- Drift report emitido para a tela, sem edits de código.
+
+---
+
+### SI-03.12a — Tela de processamento (`/studio/videos/[id]`): visual shell
+
+**Description:** Implementar visual shell: painel de mídia (player, thumbnail, duração, qualidade), VideoLinkField, ProcessingStatus, UploadProgress, sem lógica de polling (SI-03.12b).
+
+**Technical actions:**
+
+1. Criar `app/studio/videos/[id]/page.tsx` (RSC shell + client components).
+2. Criar `components/studio/upload-progress.tsx`, `processing-status.tsx`, `video-link-field.tsx`, `components/video/video-player.tsx`, `components/video/video-thumbnail.tsx` per UI Contracts.
+3. Compor Card/Progress/Avatar/Button primitives; copy singular e estados de skeletons.
+4. Aplicar auto-Edits do drift report 03.12.0.
+
+**Tests:** _(empty — shell smoke-gated by build AC; Unit tests live in SI-03.12b; E2E via /plan-test-specs)_
+
+**Dependencies:** SI-03.10, SI-03.12.0
+
+**Acceptance criteria:**
+
+- Rota `/studio/videos/[id]` (UUID válido) renderiza painel com placeholders/skeletons até primeira resposta de `GET /api/videos/[id]`.
+- Componentes de status (uploading/processing/ready/failed) renderizam a mensagem correspondente per TD-06.
+- `npm run build` compila.
+
+---
+
+### SI-03.12b — Tela de processamento (`/studio/videos/[id]`): lógica & wiring
+
+**Description:** Conectar ao rascunho + polling de status (3s enquanto uploading/processing) + Uppy progress + complete/cancel + copy link.
+
+**Technical actions:**
+
+1. Wiring: `GET /api/videos/[id]` para carregar rascunho; exibir filename/duração/qualidade/thumbnail/player quando `ready`.
+2. Integrar estado Uppy (progresso multipart) → UploadProgress; botão cancelar → `cancelAll()` → `DELETE /api/videos/[id]/upload` → status `failed/UPLOAD_ABORTED`.
+3. Short polling a cada 3s enquanto `uploading`/`processing`; parar em `ready`/`failed` (per phase-03/TD-13).
+4. CopyLinkButton: copiar URL pública (public_id) para clipboard com toggle "copiado" ~2s; renderizar como texto não clicável (per OQ-16).
+5. Estados de falha: mensagem por `processing_error` + link "Enviar outro vídeo" para `/studio/videos/new`; 404 → "Vídeo não encontrado".
+
+**Tests:**
+
+| Artifact | Layer | Test file |
+|----------|-------|-----------|
+| Processing screen wiring | Unit (Vitest+jsdom, MSW) | `components/studio/__tests__/processing-screen.wiring.test.tsx` |
+| Polling hook | Unit | `hooks/use-video-status.test.ts` |
+
+**Dependencies:** SI-03.9, SI-03.10, SI-03.11b, SI-03.12a
+
+**Acceptance criteria:**
+
+- Upload em andamento + navegação `/new`→`/[id]` preserva progresso via provider (per OQ-14).
+- Polling a cada 3s enquanto uploading/processing; para em ready/failed.
+- Botão cancelar aborta multipart e exibe status failed (UPLOAD_ABORTED).
+- CopyLinkButton copia a URL e mostra "copiado" ~2s.
+
+---
+
+## Dependency Map
+
+SI-03.1 (root)
+└── SI-03.2 — depends on SI-03.1
+    └── SI-03.3 — depends on SI-03.1, SI-03.2
+        └── SI-03.4 — depends on SI-03.3
+            └── SI-03.5 — depends on SI-03.4
+                └── SI-03.6 — depends on SI-03.3, SI-03.4, SI-03.5
+                    └── SI-03.7 — depends on SI-03.3, SI-03.4, SI-03.6
+                        └── SI-03.8 — depends on SI-03.6, SI-03.7
+                            └── SI-03.9 — depends on SI-03.5, SI-03.6 (BFF)
+                                └── SI-03.10 — depends on SI-03.9
+                                    ├── SI-03.11.0 — depends on SI-03.10
+                                    │   └── SI-03.11a — depends on SI-03.10, SI-03.11.0
+                                    │       └── SI-03.11b — depends on SI-03.9, SI-03.10, SI-03.11a
+                                    └── SI-03.12.0 — depends on SI-03.10
+                                        └── SI-03.12a — depends on SI-03.10, SI-03.12.0
+                                            └── SI-03.12b — depends on SI-03.9, SI-03.10, SI-03.11b, SI-03.12a
+
+## Deliverables
+
+- [ ] SI-03.1 — Infra storage (S3-compatível)
+- [ ] SI-03.2 — Infra fila (BullMQ + worker skeleton)
+- [ ] SI-03.3 — Entidade Video + migração
+- [ ] SI-03.4 — public_id + spawn-wrapper FFmpeg
+- [ ] SI-03.5 — StorageService multipart + presigned URLs
+- [ ] SI-03.6 — VideosService + Controller endpoints de upload
+- [ ] SI-03.7 — VideoProcessingProcessor
+- [ ] SI-03.8 — AbandonedUploadCleanup + worker compose
+- [ ] SI-03.9 — BFF Route Handlers + contracts + OpenAPI
+- [ ] SI-03.10 — Layout /studio + shell + Uppy provider
+- [ ] SI-03.11.0 — Drift audit tela de upload
+- [ ] SI-03.11a — Shell visual tela de upload
+- [ ] SI-03.11b — Wiring tela de upload
+- [ ] SI-03.12.0 — Drift audit tela de processamento
+- [ ] SI-03.12a — Shell visual tela de processamento
+- [ ] SI-03.12b — Wiring tela de processamento
+
+**Per-screen deliverables:**
+
+- [ ] Tela `/studio/videos/new` (upload) é roteável e cobre estados loading/success/error
+- [ ] Tela `/studio/videos/[id]` (processamento) é roteável e cobre estados uploading/processing/ready/failed
+
+**Full test suites:**
+
+- [ ] Backend tests pass (`cd nestjs-project && npm test -- --runInBand`)
+- [ ] Backend E2E tests pass (`cd nestjs-project && npm run test:e2e`)
+- [ ] Backend type-check pass (`cd nestjs-project && npx tsc --noEmit`)
+- [ ] Backend build pass (`cd nestjs-project && npm run build`)
+- [ ] Frontend tests pass (`cd next-frontend && npm test`)
+- [ ] Frontend E2E tests pass (`cd next-frontend && npx playwright test`)
+- [ ] Frontend type-check pass (`cd next-frontend && npx tsc --noEmit`)
+- [ ] Frontend build pass (`cd next-frontend && npm run build`)
 
 ---
 

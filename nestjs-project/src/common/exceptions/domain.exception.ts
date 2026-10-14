@@ -48,3 +48,25 @@ export class TokenReuseDetectedException extends DomainException {
     );
   }
 }
+
+export class VideoNotFoundException extends DomainException {
+  constructor() {
+    super('VIDEO_NOT_FOUND', 404, 'Video not found');
+  }
+}
+
+export class UploadNotInProgressException extends DomainException {
+  constructor() {
+    super('UPLOAD_NOT_IN_PROGRESS', 409, 'The video upload is not in progress');
+  }
+}
+
+export class InvalidUploadPartsException extends DomainException {
+  constructor() {
+    super(
+      'INVALID_UPLOAD_PARTS',
+      400,
+      'Storage rejected the uploaded parts list',
+    );
+  }
+}
